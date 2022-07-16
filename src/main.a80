@@ -1,0 +1,255 @@
+	org $1200
+
+; -----------------------------------------------------------------------------
+; Definitions (no code, no data)
+; ------------------------------
+
+DEBUG equ 0
+
+; ISR every N BLNKs where N is PIT_CNT1 x (PIT_CNT2 + 1)
+
+; PIT CTC1: mode 2
+PIT_CNT1 equ (1)
+; PIT CTC2: mode 0
+PIT_CNT2 equ (1)
+
+VRAM equ $D000 ; 4KB gfx vram 40[%40]x24
+VRAM_CHR equ (VRAM+$0000)
+VRAM_COL equ (VRAM+$0800)
+
+DISP_W equ (40)
+DISP_H equ (25)
+
+STARS_PER_ROW equ (8)
+STAR_ROWS equ (25*STARS_PER_ROW)
+
+if !DEFINED(STAR_DIR)
+	STAR_DIR = (0)								; 0: from left to right, 1: from right to left
+endif
+
+STAR_SPEED_SLL equ (3)						; left shift plus trailing 1 for minimal speed 
+STAR_SPEED_AND equ ($0F)					; mask before shifting for maximal speed
+STAR_SPEED_NEG equ (STAR_DIR > 0)
+STAR_VRAM_COL equ (39*STAR_DIR)				; the last column of a star position
+STAR_VRAM_PIX equ (7*STAR_DIR)				; the last pixel position of a star in a column
+STAR_VRAM_END equ (STAR_VRAM_COL*256+STAR_VRAM_PIX*32)
+
+SLLI macro
+	rept %2
+		SLL		%1
+	endm
+	endm
+
+NEGI macro
+	if %1
+		NEG
+	endif
+	endm
+
+DROW macro
+	vram_row = (%1/STARS_PER_ROW)
+		LD		HL,(0+star_data+(%1*4))		; get the column and pixel:fraction of the current star
+		LD		BC,(2+star_data+(%1*4))		; get the negative speed of the current star
+		ADD		HL,BC						; get the new position of this star
+		LD		A,H
+		CP		40
+		JR		C,@f						; if HL >= 40 then a new star shall be born
+		LD		A,R							; "random" speed (1/32 pixel per frame)
+		AND		STAR_SPEED_AND				; not too fast, not too slow
+		SLLI	A,STAR_SPEED_SLL
+		INC		A							; speed shall be between 8 and 64 (by default)
+		NEGI	STAR_SPEED_NEG
+		LD		(2+star_data+(%1*4)),A		; set the new speed in the new born star
+		LD		HL,STAR_VRAM_END			; set new position to the rightmost of the row
+	@@:	LD		(0+star_data+(%1*4)),HL		; set the new position in the new born star	
+		LD		C,L
+		LD		B,(star_dot_pattern>>8)		; set pointer BC upon star character pattern (256-byte aligned)
+		LD		A,(BC)						; use the pixel:fraction to retrieve the right character for this star
+		LD		BC,VRAM+(vram_row*40)		; VRAM base address for this star at the current row
+		LD		L,H
+		LD		H,0							; use the column to compute HL (shall be between 0 and 39)
+		ADD		HL,BC						; compute the final VRAM address for this star
+		LD		C,0
+		EX		DE,HL						; save the current VRAM position for the next iteration
+		; Start of the critical BLANK section
+		LD		(HL),C						; clear the previous star character in VRAM
+		LD		(DE),A						; draw the current star character in VRAM
+		; End of the critical BLANK section -> only 18 cycles here
+	endm
+
+
+; -----------------------------------------------------------------------------
+; .page (page aligned static data)
+; --------------------------------
+
+	align 256
+
+star_dot_pattern:
+		; [pixel:3(7-5)][fractional:5(4-0)] -> vertical bar at 'pixel' position
+		DS		32, $71
+		DS		32, $31
+		DS		32, $75
+		DS		32, $35
+		DS		32, $79
+		DS		32, $39
+		DS		32, $7D
+		DS		32, $3D
+
+; -----------------------------------------------------------------------------
+; .data
+; -----
+
+star_data:
+	row = 0
+	rept STAR_ROWS
+		; star position in the row: [column:8][pixel:3][fractional:5]
+		DW		0
+		DW		0
+		row = row + 1
+	endm
+
+isr_count:
+		DB		-1
+
+	if DEBUG
+	endif
+
+; -----------------------------------------------------------------------------
+; .code
+; ----
+
+; -----------------------------------------------------------------------------
+; Main entry
+; ----------
+_main:	DI									; no interrupt
+		IM		1
+
+		LD		SP,VRAM						; set stack pointer far away
+
+		LD		HL,$E007					; $E007 - counter control
+		LD		(HL),$54					; counter #1 - MODE 2 - set only LSB counter
+		LD		(HL),$90					; counter #2 - MODE 0 - set only LSB counter
+		LD		L,$05						; $E005 - counter #1
+		LD		(HL),PIT_CNT1
+		LD		L,$06						; $E006 - counter #2
+		LD		(HL),PIT_CNT2
+
+		JP		main_reset
+
+; -----------------------------------------------------------------------------
+; Main reset
+; ----------
+main_reset:
+		; Clear display
+		XOR		A
+		LD		HL,VRAM+$0000
+		LD		DE,VRAM+$0001
+		LD		BC,DISP_W*DISP_H-1
+		LD		(HL),A
+		LDIR
+
+		; Black & white
+		LD		A,$70
+		LD		HL,VRAM+$0800
+		LD		DE,VRAM+$0801
+		LD		BC,DISP_W*DISP_H-1
+		LD		(HL),A
+		LDIR
+
+		; Randomize position and speed of all stars
+		LD		DE,star_data
+		LD		B,STAR_ROWS
+		LD		HL,1
+	@0:	CALL	randomize					; randomize the star pixel position
+		AND		$E0							; only set pixel part, fractional being set to 0
+		LD		(DE),A
+		INC		DE
+	@@:	CALL	randomize					; randomimze the star column position
+		SUB		40							; column shall be between 0 and 39
+		JR		NC,@b
+		ADD		A,40
+		LD		(DE),A
+		INC		DE
+		CALL	randomize					; randomize the star speed
+		AND		STAR_SPEED_AND				; not too fast, not too slow
+		SLLI	A,STAR_SPEED_SLL
+		INC		A							; speed shall be between 8 and 64 (by default)
+		NEGI	STAR_SPEED_NEG
+		LD		(DE),A
+		INC		DE
+		INC		DE
+		DJNZ	@0b
+
+		JP		main_loop
+
+; -----------------------------------------------------------------------------
+; Randomize
+; ----------
+randomize:
+		LD		A,H
+		RRA
+		LD		A,L
+		RRA
+		XOR		H
+		LD		H,A
+		LD		A,L
+ 		RRA
+		LD		A,H
+ 		RRA
+		XOR		L
+		LD		L,A
+		XOR		H
+		LD		H,A
+		RET
+
+; -----------------------------------------------------------------------------
+; Main exit
+; ---------
+main_exit:
+		LD		SP,$10F0					; set stack pointer as MONITOR wants
+		JP		$00AD
+
+; -----------------------------------------------------------------------------
+; Main loop
+; ----------
+main_loop:
+
+		LD		HL,$E002
+		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
+	@@:	CP		(HL)						; poll /VBLK until it becomes high
+		JP		NC,@b
+	@@:	CP		(HL)						; poll /VBLK until it becomes low
+		JP		C,@b
+
+		LD		DE,$D7FF					; dummy VRAM pointer
+	@0:	; Render the firt star 
+		DROW	0	
+
+		LD		HL,$E002
+		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
+	@@:	CP		(HL)						; poll /VBLK until it becomes high
+		JP		NC,@b
+
+		; Render the rest of stars
+		row = 1
+	rept STAR_ROWS-1
+		DROW	row
+		row = row + 1
+	endm
+		; LD		B,8
+		; DJNZ	$
+		; LD		A,($D7FF)
+
+		JP		@0b
+
+; -----------------------------------------------------------------------------
+; .bss
+; ----
+
+	align 256
+_bss:
+	offset $
+	end
+
+; -----------------------------------------------------------------------------
+end	_main

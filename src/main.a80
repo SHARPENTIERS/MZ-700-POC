@@ -13,55 +13,55 @@ PIT_CNT1 equ (1)
 ; PIT CTC2: mode 0
 PIT_CNT2 equ (1)
 
-VRAM equ $D000 ; 4KB gfx vram 40[%40]x24
+VRAM equ $D000 ; 4KB gfx vram 40[%40]x25
 VRAM_CHR equ (VRAM+$0000)
 VRAM_COL equ (VRAM+$0800)
 
 DISP_W equ (40)
 DISP_H equ (25)
 
+; --- Keyboard ---
+
+PPI8255_KEYPA	equ $E000 ; 8255 PORT A (W): SELECT KEYBOARD MATRIX COLUMN
+PPI8255_KEYPB	equ $E001 ; 8255 PORT B (R): READ KEYBOARD MATRIX ROW
+
+KBD_LA_BIT		equ 0 ; [ <--   ] Left Arrow key
+KBD_RA_BIT		equ 1 ; [  -->  ] Right Arrow key
+KBD_SP_BIT		equ 2 ; [ SPACE ] Space key
+KBD_F1_BIT		equ 4 ; [  F1   ] F1 key
+KBD_F2_BIT		equ 5 ; [  F2   ] F2 key
+KBD_F3_BIT		equ 6 ; [  F3   ] F3 key
+KBD_BR_BIT		equ 7 ; [ BREAK ] BREAK key
+
+; --- Star Dust ---
+
 STARS_PER_ROW equ (8)
 STAR_ROWS equ (25*STARS_PER_ROW)
 
-if !DEFINED(STAR_DIR)
-	STAR_DIR = (0)								; 0: from left to right, 1: from right to left
-endif
-
-STAR_SPEED_SLL equ (3)						; left shift plus trailing 1 for minimal speed 
-STAR_SPEED_AND equ ($0F)					; mask before shifting for maximal speed
-STAR_SPEED_NEG equ (STAR_DIR > 0)
-STAR_VRAM_COL equ (39*STAR_DIR)				; the last column of a star position
-STAR_VRAM_PIX equ (7*STAR_DIR)				; the last pixel position of a star in a column
+STAR_VRAM_COL equ (39)						; the last column of a star position
+STAR_VRAM_PIX equ (7)						; the last pixel position of a star in a column
 STAR_VRAM_END equ (STAR_VRAM_COL*256+STAR_VRAM_PIX*32)
 
-SLLI macro
-	rept %2
-		SLL		%1
-	endm
-	endm
-
-NEGI macro
-	if %1
-		NEG
-	endif
-	endm
-
 DROW macro
+	DROW_beg = $ 
 	vram_row = (%1/STARS_PER_ROW)
-		LD		HL,(0+star_data+(%1*4))		; get the column and pixel:fraction of the current star
-		LD		BC,(2+star_data+(%1*4))		; get the negative speed of the current star
+		LD		HL,(0+stardust_data+(%1*4))	; get the column and pixel:fraction of the current star
+		LD		BC,(2+stardust_data+(%1*4))	; get the negative speed of the current star
 		ADD		HL,BC						; get the new position of this star
 		LD		A,H
 		CP		40
 		JR		C,@f						; if HL >= 40 then a new star shall be born
 		LD		A,R							; "random" speed (1/32 pixel per frame)
-		AND		STAR_SPEED_AND				; not too fast, not too slow
-		SLLI	A,STAR_SPEED_SLL
-		INC		A							; speed shall be between 8 and 64 (by default)
-		NEGI	STAR_SPEED_NEG
-		LD		(2+star_data+(%1*4)),A		; set the new speed in the new born star
-		LD		HL,STAR_VRAM_END			; set new position to the rightmost of the row
-	@@:	LD		(0+star_data+(%1*4)),HL		; set the new position in the new born star	
+		SLL		A
+		SLL		A
+		SLL		A
+		NOP
+		NOP
+	DROW_neg = $ - 2 - DROW_beg
+		LD		(2+stardust_data+(%1*4)),A	; set the new speed in the new born star
+		LD		HL,0						; set new position to the rightmost of the row
+	DROW_vram_end = $ - 2 - DROW_beg
+	@@:	LD		(0+stardust_data+(%1*4)),HL	; set the new position in the new born star	
 		LD		C,L
 		LD		B,(star_dot_pattern>>8)		; set pointer BC upon star character pattern (256-byte aligned)
 		LD		A,(BC)						; use the pixel:fraction to retrieve the right character for this star
@@ -69,20 +69,34 @@ DROW macro
 		LD		L,H
 		LD		H,0							; use the column to compute HL (shall be between 0 and 39)
 		ADD		HL,BC						; compute the final VRAM address for this star
-		LD		C,0
 		EX		DE,HL						; save the current VRAM position for the next iteration
+	if '%2' == ''
+		; End of the critical BLANK section -> only 18 cycles here
 		; Start of the critical BLANK section
-		LD		(HL),C						; clear the previous star character in VRAM
+		LD		(HL),0						; clear the previous star character in VRAM
 		LD		(DE),A						; draw the current star character in VRAM
 		; End of the critical BLANK section -> only 18 cycles here
+	else
+		LD		C,A
+		; Start of the critical BLANK section
+		LD		A,(DE)
+		LD		(HL),0						; clear the previous star character in VRAM
+		OR		A
+		LD		A,C
+		JR		Z,@f
+		LD		DE,VRAM+$FFF
+	@@:	LD		(DE),A						; draw the current star character in VRAM
+	endif
+	DROW_size = $ - DROW_beg
 	endm
-
 
 ; -----------------------------------------------------------------------------
 ; .page (page aligned static data)
 ; --------------------------------
 
 	align 256
+
+; --- Star Dust ---
 
 star_dot_pattern:
 		; [pixel:3(7-5)][fractional:5(4-0)] -> vertical bar at 'pixel' position
@@ -99,24 +113,320 @@ star_dot_pattern:
 ; .data
 ; -----
 
-star_data:
-	row = 0
-	rept STAR_ROWS
-		; star position in the row: [column:8][pixel:3][fractional:5]
-		DW		0
-		DW		0
-		row = row + 1
-	endm
+; --- Keyboard ---
+
+kbd_keymap:
+		DB		$00
+
+; --- Star Dust ---
+
+stardust_data:
+		DS		4*STAR_ROWS
+stardust_lr_menu_chr:
+		binclude "../gfx/stardust-lr-menu-chr.zx0"
+stardust_lr_menu_col:
+		binclude "../gfx/stardust-lr-menu-col.zx0"
+stardust_rl_menu_chr:
+		binclude "../gfx/stardust-rl-menu-chr.zx0"
+stardust_rl_menu_col:
+		binclude "../gfx/stardust-rl-menu-col.zx0"
+startrek_menu_chr:
+		binclude "../gfx/startrek-menu-chr.zx0"
+startrek_menu_col:
+		binclude "../gfx/startrek-menu-col.zx0"
+startrek_chr:
+		binclude "../gfx/startrek-chr.zx0"
+startrek_col:
+		binclude "../gfx/startrek-col.zx0"
+
+; --- Main ---
 
 isr_count:
 		DB		-1
 
-	if DEBUG
-	endif
-
 ; -----------------------------------------------------------------------------
 ; .code
-; ----
+; -----
+
+; --- Keyboard ---
+
+; -----------------------------------------------------------------------------
+; Reset keyboard
+; --------------
+; in:
+;	none
+; out:
+;	flag Z = 1 if no change else 0
+kbd_reset:
+		XOR		A
+		JP		@0f
+; -----------------------------------------------------------------------------
+; Read keyboard
+; -------------
+; in:
+;	none
+; out:
+;	A = current keymap - one bit set to 1 means keypressed
+;		(bit 7: [BREAK], bits 6,5,4: [F1][F2][F3], bit 2: [SPACE], bits 1,0: [->][<-])
+;	C = previous keymap - same rationale as current keymap
+;	flag Z = 1 if no change else 0
+kbd_read:
+		LD		HL,PPI8255_KEYPA; port A to select keyboard matrix column
+		LD		DE,PPI8255_KEYPB; port B to read keyboard matrix row
+		LD		B,$F0+6			; matrix column 6
+		LD		(HL),B			; select keyboard matrix column containing SPACE key
+		LD		A,(DE)			; read keyboard matrix row
+		CPL
+		AND		$10				; SPACE bit
+		LD		C,A
+		INC		B				; matrix column 7
+		LD		(HL),B			; select keyboard matrix column containing [<-/->] arrows keys
+		LD		A,(DE)			; read keyboard matrix row
+		CPL
+		AND		$0C				; [<-] and [->] arrows bits
+		OR		C
+		RRCA
+		RRCA
+		LD		C,A
+		INC		B				; matrix column 8
+		LD		(HL),B			; select keyboard matrix column containing [BREAK] key
+		LD		A,(DE)			; read keyboard matrix row
+		CPL
+		AND		$80				; BREAK bit
+		OR		C
+		LD		C,A
+		INC		B
+		LD		(HL),B			; select keyboard matrix column containing [F1/F2/F3] keys
+		LD		A,(DE)			; read keyboard matrix row
+		CPL
+		AND		$E0				; [F1/F2/F3] bits
+		RRCA
+		OR		C
+@0:		LD		HL,kbd_keymap
+		LD		C,(HL)			; retrieve previous keymap in C register
+		CP		C				; compare it to current keymap in A register
+		RET		Z				; no change of key status
+		LD		(HL),A
+		RET
+
+; --- Star Dust ---
+
+; -----------------------------------------------------------------------------
+; Star Dust loop
+; ----------
+stardust_loop_rl:
+		LD		A,1
+		JP		@3f
+
+stardust_loop_lr:
+		XOR		A
+		JP		@3f
+
+		; Clear display
+	@0:	XOR		A
+		LD		HL,VRAM+$0000
+		LD		DE,VRAM+$0001
+		LD		BC,DISP_W*DISP_H-1
+		LD		(HL),A
+		LDIR
+
+		; Black & white
+		LD		A,$70
+		LD		HL,VRAM+$0800
+		LD		DE,VRAM+$0801
+		LD		BC,DISP_W*DISP_H-1
+		LD		(HL),A
+		LDIR
+
+		; Randomize position and speed of all stars
+		LD		DE,stardust_data
+		LD		B,STAR_ROWS
+	@1:	CALL	rnd							; randomize the star pixel position
+		AND		$E0							; only set pixel part, fractional being set to 0
+		LD		(DE),A
+		INC		DE
+		CALL	rnd							; randomimze the star column position
+	@@:	SUB		40							; column shall be between 0 and 39
+		JR		NC,@b
+		ADD		A,40
+		LD		(DE),A
+		INC		DE
+		CALL	rnd							; randomize the star speed
+		SLL		A
+		SLL		A
+		SLL		A
+		NEG
+	stardust_loop_rand_address equ ($-2)
+		LD		(DE),A
+		INC		DE
+		LD		A,-1
+	stardust_loop_rand_offset equ ($-1-stardust_loop_rand_address)
+		LD		(DE),A
+		INC		DE
+		DJNZ	@1b
+
+		LD		HL,$E002
+		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
+	@@:	CP		(HL)						; poll /VBLK until it becomes high
+		JP		NC,@b
+	@@:	CP		(HL)						; poll /VBLK until it becomes low
+		JP		C,@b
+
+		LD		DE,VRAM+$0FFF				; dummy VRAM pointer
+
+	@2:	; Render the firt dot
+	stardust_draw_row_0 equ ($)
+		DROW	0	
+
+		LD		HL,$E002
+		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
+	@@:	CP		(HL)						; poll /VBLK until it becomes high
+		JP		NC,@b
+
+		; Render the rest of dots
+	stardust_draw_row_N equ ($)
+		row = 1
+	rept STAR_ROWS-1
+		DROW	row
+		row = row + 1
+	endm
+
+		EXX
+		CALL	kbd_read
+		EXX
+		BIT		KBD_BR_BIT,A
+		JP		Z,@2b
+
+	@@:	CALL	kbd_read
+		BIT		KBD_BR_BIT,A
+		JR		NZ,@b
+
+		JP		main_loop
+
+		; Self-modify the code according to the star dust scrolling direction
+	@3:	LD		IX,stardust_draw_row_0
+		LD		IY,stardust_loop_rand_address
+		LD		DE,stardust_draw_row_N - stardust_draw_row_0
+		LD		B,STAR_ROWS
+		OR		A
+		JR		Z,@4f
+		LD		(IY+0),$ED
+		LD		(IY+1),$44
+		LD		(IY+stardust_loop_rand_offset),$FF
+	@@:	LD		(IX+DROW_neg+0),$ED
+		LD		(IX+DROW_neg+1),$44
+		LD		(IX+DROW_vram_end+0),STAR_VRAM_PIX*32
+		LD		(IX+DROW_vram_end+1),STAR_VRAM_COL
+		ADD		IX,DE
+		LD		DE,DROW_size
+		DJNZ	@b
+		JP		@0b
+	@4:	LD		(IY+0),A
+		LD		(IY+1),A
+		LD		(IY+stardust_loop_rand_offset),A
+	@@:	LD		(IX+DROW_neg+0),A
+		LD		(IX+DROW_neg+1),A
+		LD		(IX+DROW_vram_end+0),A
+		LD		(IX+DROW_vram_end+1),A
+		ADD		IX,DE
+		LD		DE,DROW_size
+		DJNZ	@b
+		JP		@0b
+
+		; local randomizer routine
+rnd:	LD		HL,1						; be aware that seed shall never be 0
+	@@:	LD		A,H
+		RRA
+		LD		A,L
+		RRA
+		XOR		H
+		LD		H,A
+		LD		A,L
+ 		RRA
+		LD		A,H
+ 		RRA
+		XOR		L
+		LD		L,A
+		XOR		H
+		LD		H,A
+		LD		(@b-2),HL
+		RET
+
+; --- Star Trek ---
+
+; -----------------------------------------------------------------------------
+; Star Trek loop
+; ----------
+startrek_loop:
+		LD		HL,startrek_chr
+		LD		DE,VRAM_CHR
+		CALL	dzx0_standard
+		LD		HL,startrek_col
+		LD		DE,VRAM_COL
+		CALL	dzx0_standard
+
+		; Randomize position and speed of all stars
+	@0:	LD		DE,stardust_data
+		LD		B,STAR_ROWS
+		LD		HL,1						; be aware that seed shall never be 0 
+	@1:	CALL	rnd							; randomize the star pixel position
+		AND		$E0							; only set pixel part, fractional being set to 0
+		LD		(DE),A
+		INC		DE
+		CALL	rnd							; randomimze the star column position
+	@@:	SUB		40							; column shall be between 0 and 39
+		JR		NC,@b
+		ADD		A,40
+		LD		(DE),A
+		INC		DE
+		CALL	rnd							; randomize the star speed
+		SLL		A
+		SLL		A
+		SLL		A
+		LD		(DE),A
+		INC		DE
+		XOR		A
+		LD		(DE),A
+		INC		DE
+		DJNZ	@1b
+
+		LD		HL,$E002
+		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
+	@@:	CP		(HL)						; poll /VBLK until it becomes high
+		JP		NC,@b
+	@@:	CP		(HL)						; poll /VBLK until it becomes low
+		JP		C,@b
+
+		LD		DE,VRAM+$0FFF				; dummy VRAM pointer
+
+	@2:	; Render the firt dot
+		DROW	0,t
+
+		LD		HL,$E002
+		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
+	@@:	CP		(HL)						; poll /VBLK until it becomes high
+		JP		NC,@b
+
+		; Render the rest of dots
+		row = 1
+	rept STAR_ROWS-1
+		DROW	row,t
+		row = row + 1
+	endm
+
+		EXX
+		CALL	kbd_read
+		EXX
+		BIT		KBD_BR_BIT,A
+		JP		Z,@2b
+
+	@@:	CALL	kbd_read
+		BIT		KBD_BR_BIT,A
+		JR		NZ,@b
+
+		JP		main_loop
+
+; --- Main ---
 
 ; -----------------------------------------------------------------------------
 ; Main entry
@@ -140,107 +450,161 @@ _main:	DI									; no interrupt
 ; Main reset
 ; ----------
 main_reset:
-		; Clear display
-		XOR		A
-		LD		HL,VRAM+$0000
-		LD		DE,VRAM+$0001
-		LD		BC,DISP_W*DISP_H-1
-		LD		(HL),A
-		LDIR
-
-		; Black & white
-		LD		A,$70
-		LD		HL,VRAM+$0800
-		LD		DE,VRAM+$0801
-		LD		BC,DISP_W*DISP_H-1
-		LD		(HL),A
-		LDIR
-
-		; Randomize position and speed of all stars
-		LD		DE,star_data
-		LD		B,STAR_ROWS
-		LD		HL,1
-	@0:	CALL	randomize					; randomize the star pixel position
-		AND		$E0							; only set pixel part, fractional being set to 0
-		LD		(DE),A
-		INC		DE
-	@@:	CALL	randomize					; randomimze the star column position
-		SUB		40							; column shall be between 0 and 39
-		JR		NC,@b
-		ADD		A,40
-		LD		(DE),A
-		INC		DE
-		CALL	randomize					; randomize the star speed
-		AND		STAR_SPEED_AND				; not too fast, not too slow
-		SLLI	A,STAR_SPEED_SLL
-		INC		A							; speed shall be between 8 and 64 (by default)
-		NEGI	STAR_SPEED_NEG
-		LD		(DE),A
-		INC		DE
-		INC		DE
-		DJNZ	@0b
+		CALL	kbd_reset
 
 		JP		main_loop
-
-; -----------------------------------------------------------------------------
-; Randomize
-; ----------
-randomize:
-		LD		A,H
-		RRA
-		LD		A,L
-		RRA
-		XOR		H
-		LD		H,A
-		LD		A,L
- 		RRA
-		LD		A,H
- 		RRA
-		XOR		L
-		LD		L,A
-		XOR		H
-		LD		H,A
-		RET
-
 ; -----------------------------------------------------------------------------
 ; Main exit
 ; ---------
 main_exit:
 		LD		SP,$10F0					; set stack pointer as MONITOR wants
+
+		LD		HL,VRAM_COL+0
+		LD		DE,VRAM_COL+1
+		LD		BC,1000
+		LD		(HL),$71
+		LDIR
 		JP		$00AD
 
 ; -----------------------------------------------------------------------------
 ; Main loop
 ; ----------
 main_loop:
+		LD		C,0
+	menu_entry equ ($-1)
 
-		LD		HL,$E002
-		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
-	@@:	CP		(HL)						; poll /VBLK until it becomes high
-		JP		NC,@b
-	@@:	CP		(HL)						; poll /VBLK until it becomes low
-		JP		C,@b
+	@0:	LD		A,C
+		LD		HL,stardust_lr_menu_chr
+		LD		IY,stardust_lr_menu_col
+		LD		IX,stardust_loop_lr
+		OR		A
+		JR		Z,@f
+		LD		HL,stardust_rl_menu_chr
+		LD		IY,stardust_rl_menu_col
+		LD		IX,stardust_loop_rl
+		DEC		A
+		JR		Z,@f
+		LD		HL,startrek_menu_chr
+		LD		IY,startrek_menu_col
+		LD		IX,startrek_loop
+		DEC		A
+		JR		NZ,@1f
 
-		LD		DE,$D7FF					; dummy VRAM pointer
-	@0:	; Render the firt star 
-		DROW	0	
+	@@:	PUSH	BC
+		LD		DE,VRAM_CHR
+		CALL	dzx0_standard
+		PUSH	IY
+		POP		HL
+		LD		DE,VRAM_COL
+		CALL	dzx0_standard
+		POP		BC
+	
+		; Read keyboard
+	@1:	LD		A,100
+		LD		B,255						; on a real MZ-700, there are key rebounces after pressing/releasing a key
+	@@:	DJNZ	@b							; so let us wait around 100ms (100 x (255 x 13 + 16) / 3500000Hz)
+		DEC		A
+		JR		NZ,@b
 
-		LD		HL,$E002
-		LD		A,$80						; C = ($E002) < $80 <=> $E002.bit7 == 0
-	@@:	CP		(HL)						; poll /VBLK until it becomes high
-		JP		NC,@b
+		EXX
+		CALL	kbd_read
+		EXX
+		JR		Z,@1b
 
-		; Render the rest of stars
-		row = 1
-	rept STAR_ROWS-1
-		DROW	row
-		row = row + 1
-	endm
-		; LD		B,8
-		; DJNZ	$
-		; LD		A,($D7FF)
+		BIT		KBD_LA_BIT,A
+		JR		NZ,@2f
 
-		JP		@0b
+		BIT		KBD_RA_BIT,A
+		JR		NZ,@3f
+
+		BIT		KBD_SP_BIT,A
+		JR		NZ,@4f
+
+		BIT		KBD_BR_BIT,A
+		JP		NZ,main_exit
+
+		JR		@1b
+
+		; Left arrow action
+	@2:	DEC		C
+		LD		A,C
+		CP		3
+		JR		C,@0b
+		LD		C,2
+		JR		@0b
+	
+		; Right arrow action
+	@3:	INC		C
+		LD		A,C
+		CP		3
+		JR		C,@0b
+		LD		C,0
+		JR		@0b
+
+	@4:	LD		A,C
+		LD		(menu_entry),A
+		JP		(IX)
+
+; -----------------------------------------------------------------------------
+; ZX0 decoder by Einar Saukas & Urusergi
+; "Standard" version (68 bytes only)
+; -----------------------------------------------------------------------------
+; Parameters:
+;   HL: source address (compressed data)
+;   DE: destination address (decompressing)
+; -----------------------------------------------------------------------------
+
+dzx0_standard:
+		LD		BC,$FFFF				; preserve default offset 1
+		PUSH	BC
+		INC		BC
+		LD		A,$80
+dzx0s_literals:
+		CALL	dzx0s_elias				; obtain length
+		LDIR							; copy literals
+		ADD		A,A						; copy from last offset or new offset?
+		JR		C,dzx0s_new_offset
+		CALL	dzx0s_elias				; obtain length
+dzx0s_copy:
+		EX		(SP),HL					; preserve source, restore offset
+		PUSH	HL						; preserve offset
+		ADD		HL,DE					; calculate destination - offset
+		LDIR							; copy from offset
+		POP		HL						; restore offset
+		EX		(SP),HL					; preserve offset, restore source
+		ADD		A,A						; copy from literals or new offset?
+		JR		NC,dzx0s_literals
+dzx0s_new_offset:
+		POP		BC						; discard last offset
+		LD		C,$FE					; prepare negative offset
+		CALL	dzx0s_elias_loop		; obtain offset MSB
+		INC		C
+		RET		Z						; check end marker
+		LD		B,C
+		LD		C,(HL)					; obtain offset LSB
+		INC		HL
+		RR		B						; last offset bit becomes first length bit
+		RR		C
+		PUSH	BC						; preserve new offset
+		LD		BC,1					; obtain length
+		CALL	NC,dzx0s_elias_backtrack
+		INC		BC
+		JR		dzx0s_copy
+dzx0s_elias:
+		INC		C						; interlaced Elias gamma coding
+dzx0s_elias_loop:
+		ADD		A,A
+		JR		NZ,dzx0s_elias_skip
+		LD		A,(HL)					; load another group of 8 bits
+		INC		HL
+		RLA
+dzx0s_elias_skip:
+		RET		C
+dzx0s_elias_backtrack:
+		ADD		A,A
+		RL		C
+		RL		B
+		JR		dzx0s_elias_loop
 
 ; -----------------------------------------------------------------------------
 ; .bss
@@ -253,3 +617,4 @@ _bss:
 
 ; -----------------------------------------------------------------------------
 end	_main
+

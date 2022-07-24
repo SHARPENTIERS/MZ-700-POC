@@ -9,6 +9,7 @@ Special credits to:
 
 Note that Z80AS executable is an anglisized version of the source I rebuild because it was too difficult to deal with assembly errors in Japanese language.
 
-##Contents
+# Contents
 
 - Star Dust: an horizontal set of dots moving in pixel unit as smooth as possible.
+- Star Trek: same as Star Dust but dots are drawn behind the Enterprise vessel.
